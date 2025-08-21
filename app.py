@@ -1,131 +1,134 @@
 import streamlit as st
 import pandas as pd
-import folium
-from streamlit_folium import st_folium
-from streamlit_geolocation import streamlit_geolocation
-import math
 import os
+import math
+from streamlit_geolocation import streamlit_geolocation
+import numpy as np # 計算を高速化するためにNumPyを使用
 
 # --- 1. 基本設定とヘルパー関数の定義 ---
 
-# ページ設定
-st.set_page_config(layout="wide", page_title="GPS連携マッピングアプリ")
+st.set_page_config(layout="centered", page_title="最寄りキロ程検索")
 
 # データが格納されているフォルダのパス
 DATA_DIR = "data"
 
-# Haversine公式で2点間の距離を計算する関数 (メートル)
-def calculate_distance(lat1, lon1, lat2, lon2):
-    """2点の緯度経度から距離を計算する"""
+# ★★★ NumPyを使った高速な距離計算関数 ★★★
+def calculate_distance_vectorized(lat1, lon1, lat2_array, lon2_array):
+    """ユーザーの緯度経度（単一）と全データの緯度経度（配列）から一度に距離を計算する"""
     R = 6371e3  # 地球の半径 (メートル)
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    delta_phi = math.radians(lat2 - lat1)
-    delta_lambda = math.radians(lon2 - lon1)
+    
+    # 度をラジアンに変換
+    lat1_rad = np.radians(lat1)
+    lon1_rad = np.radians(lon1)
+    lat2_rad = np.radians(lat2_array)
+    lon2_rad = np.radians(lon2_array)
 
-    a = math.sin(delta_phi / 2) ** 2 + \
-        math.cos(phi1) * math.cos(phi2) * \
-        math.sin(delta_lambda / 2) ** 2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
+    dlon = lon2_rad - lon1_rad
+    dlat = lat2_rad - lat1_rad
+
+    # Haversineの公式
+    a = np.sin(dlat / 2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+
+    distances = R * c
+    return distances
+
+# データを読み込む関数（キャッシュで高速化）
+@st.cache_data
+def load_all_data(data_dir):
+    """dataフォルダ内の全CSVを読み込み、一つのDataFrameに結合する"""
+    all_csv_files = []
+    try:
+        all_csv_files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
+    except FileNotFoundError:
+        return pd.DataFrame(), False # データフレームとエラーフラグを返す
+
+    if not all_csv_files:
+        return pd.DataFrame(), True # データフレームとファイルなしフラグを返す
+
+    df_list = []
+    for file_name in all_csv_files:
+        file_path = os.path.join(data_dir, file_name)
+        try:
+            df = pd.read_csv(file_path, low_memory=False)
+            if 'Lat' in df.columns and 'Lon' in df.columns:
+                df['Lat'] = pd.to_numeric(df['Lat'], errors='coerce')
+                df['Lon'] = pd.to_numeric(df['Lon'], errors='coerce')
+                df.dropna(subset=['Lat', 'Lon'], inplace=True)
+                df_list.append(df)
+        except Exception:
+            # ファイル読み込みエラーはここでは無視
+            pass
+    
+    if not df_list:
+        return pd.DataFrame(), True
+        
+    master_data = pd.concat(df_list, ignore_index=True)
+    return master_data, True # データフレームと成功フラグを返す
 
 # --- 2. StreamlitアプリのUIとメイン処理 ---
 
-st.title("🗺️ GPS連携マッピングアプリ")
-st.write(f"リポジトリ内の`{DATA_DIR}`フォルダにあるCSVファイルを選択して、地図に表示します。")
+st.title("🛰️ 最寄りキロ程検索ツール")
+st.write(f"リポジトリ内の`{DATA_DIR}`フォルダにある全データを対象に、あなたの現在地に最も近い地点の情報を検索します。")
 
-# --- ファイル選択ロジック ---
-try:
-    # サーバーにクローンされたdataディレクトリの中身からCSVファイルのみをリストアップ
-    all_csv_files = [f for f in os.listdir(DATA_DIR) if f.endswith('.csv')]
-except FileNotFoundError:
-    st.error(f"'{DATA_DIR}' フォルダが見つかりません。リポジトリのルートに`{DATA_DIR}`フォルダを作成し、CSVを格納してください。")
-    all_csv_files = []
+# 全データの読み込み
+master_data, success = load_all_data(DATA_DIR)
 
-if all_csv_files:
-    selected_files = st.multiselect(
-        "表示するマスターデータを選択してください（複数選択可）",
-        options=all_csv_files,
-        default=all_csv_files[0] if all_csv_files else [] # デフォルトで最初のファイルを選択
-    )
-    
-    # --- データ読み込みと結合 ---
-    if selected_files:
-        all_data_frames = []
-        with st.spinner("選択されたデータを読み込み中..."):
-            for file_name in selected_files:
-                file_path = os.path.join(DATA_DIR, file_name)
-                try:
-                    df = pd.read_csv(file_path)
-                    # 緯度・経度(Lat, Lon)列の存在と型を確認
-                    if 'Lat' in df.columns and 'Lon' in df.columns:
-                        df['Lat'] = pd.to_numeric(df['Lat'], errors='coerce')
-                        df['Lon'] = pd.to_numeric(df['Lon'], errors='coerce')
-                        df.dropna(subset=['Lat', 'Lon'], inplace=True)
-                        all_data_frames.append(df)
-                    else:
-                        st.warning(f"ファイル '{file_name}' には 'Lat' または 'Lon' 列がありません。スキップします。")
-                except Exception as e:
-                    st.warning(f"ファイル '{file_name}' の読み込みに失敗しました: {e}")
-        
-        # --- 地図表示とGPS連携 ---
-        if all_data_frames:
-            master_data = pd.concat(all_data_frames, ignore_index=True)
-            st.success(f"{len(selected_files)}個のファイルから合計 {len(master_data)}件のデータを読み込みました。")
-            
-            location = streamlit_geolocation()
-            
-            # 地図の中心を決定
-            if location['latitude'] and location['longitude']:
-                center_lat, center_lon, zoom_start = location['latitude'], location['longitude'], 15
-            else:
-                center_lat, center_lon, zoom_start = master_data['Lat'].mean(), master_data['Lon'].mean(), 12
-                st.info("GPS情報を取得中です... ブラウザの許可を確認してください。")
-
-            m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom_start)
-
-            # マーカーを地図に追加
-            for _, row in master_data.iterrows():
-                popup_html = f"<b>Line:</b> {row.get('Line', 'N/A')}<br><b>Distance:</b> {row.get('Distance', 'N/A')}"
-                folium.CircleMarker(
-                    [row['Lat'], row['Lon']],
-                    radius=3,
-                    color='red',
-                    fill=True,
-                    fill_color='darkred',
-                    popup=folium.Popup(popup_html, max_width=200)
-                ).add_to(m)
-
-            # GPS位置が取得できたら、最寄り地点を計算・表示
-            if location['latitude'] and location['longitude']:
-                user_lat, user_lon = location['latitude'], location['longitude']
-                
-                # ユーザーの現在地マーカー
-                folium.Marker(
-                    [user_lat, user_lon], 
-                    popup="あなたの現在地", 
-                    icon=folium.Icon(color='blue', icon='user', prefix='fa')
-                ).add_to(m)
-                
-                # 最も近いポイントを計算
-                master_data['distance_to_user'] = master_data.apply(
-                    lambda row: calculate_distance(user_lat, user_lon, row['Lat'], row['Lon']), axis=1
-                )
-                nearest_point = master_data.loc[master_data['distance_to_user'].idxmin()]
-                
-                st.subheader("🛰️ 最寄りのポイント情報")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Line", f"{nearest_point.get('Line', 'N/A')}")
-                col2.metric("Distance", f"{nearest_point.get('Distance', 'N/A')}")
-                col3.metric("現在地からの距離", f"{nearest_point['distance_to_user']:.1f} m")
-
-            # 地図を表示
-            st_folium(m, width='100%', height=600, returned_objects=[])
-
-            # データテーブル表示 (任意)
-            with st.expander("データテーブルを表示"):
-                st.dataframe(master_data)
-        else:
-            st.warning("有効なデータを含むファイルが選択されていません。")
+if not success:
+    st.error(f"'{DATA_DIR}' フォルダが見つかりません。リポジトリの構成を確認してください。")
+elif master_data.empty:
+    st.warning(f"`{DATA_DIR}`フォルダに有効なCSVデータが見つかりませんでした。")
 else:
-    st.info(f"`{DATA_DIR}`フォルダにCSVファイルが見つかりません。GitHubリポジトリにデータをアップロードしてください。")
+    st.success(f"準備完了 ({len(master_data):,} 件のデータを読み込みました)")
+    st.markdown("---")
+
+    st.subheader("1. 現在地を取得")
+    # 位置情報を取得するウィジェット
+    location = streamlit_geolocation()
+
+    if location and location.get('latitude'):
+        user_lat = location['latitude']
+        user_lon = location['longitude']
+        st.write(f"あなたの現在地: 緯度 `{user_lat:.6f}`, 経度 `{user_lon:.6f}`")
+        
+        st.subheader("2. 最寄り地点を検索")
+        if st.button("検索開始", use_container_width=True):
+            with st.spinner("全データから最も近い地点を計算中..."):
+                # NumPy配列として緯度経度を抽出
+                lat_array = master_data['Lat'].values
+                lon_array = master_data['Lon'].values
+                
+                # 高速なベクトル計算を実行
+                distances = calculate_distance_vectorized(user_lat, user_lon, lat_array, lon_array)
+                
+                # 最小距離のインデックス（位置）を見つける
+                nearest_idx = np.argmin(distances)
+                
+                # 最も近い地点のデータを取得
+                nearest_point = master_data.iloc[nearest_idx]
+                min_distance = distances[nearest_idx]
+
+            st.subheader("✅ 検索結果")
+            
+            # 結果をメトリックで表示
+            col1, col2 = st.columns(2)
+            # 'キロ程'列が存在するか確認
+            if '中心位置キロ程' in nearest_point:
+                 col1.metric("最寄りのキロ程", f"{nearest_point['中心位置キロ程']:.1f} m")
+            else:
+                 col1.metric("最寄りのキロ程", "情報なし")
+            
+            col2.metric("現在地からの距離", f"{min_distance:.1f} m")
+            
+            # その他の詳細情報を表示
+            st.write("---")
+            st.write("**最寄り地点の詳細情報:**")
+            
+            # 表示したい列を定義（存在しない列は無視される）
+            display_columns = [
+                '踏切名', '線名', '支社名', '箇所名（系統名なし）', '踏切種別'
+            ]
+            # nearest_pointから存在する列のみを抽出
+            details_to_show = {col: nearest_point.get(col, "情報なし") for col in display_columns if col in nearest_point}
+
+            st.table(pd.DataFrame(details_to_show.items(), columns=['項目', '内容']))
