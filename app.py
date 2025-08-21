@@ -73,8 +73,8 @@ else:
 
     st.subheader("現在地と最寄り地点情報")
     
-    # 位置情報をリアルタイムで監視
-    location = streamlit_geolocation(key="gps_location")
+    # ▼▼▼【修正箇所】'key'引数を削除 ▼▼▼
+    location = streamlit_geolocation()
 
     # 結果表示用のプレースホルダー
     results_placeholder = st.empty()
@@ -99,7 +99,6 @@ else:
                 st.subheader("✅ 検索結果")
                 col1, col2 = st.columns(2)
 
-                # ★★★【修正箇所】キロ程が入っている列名を 'Distance' に変更 ★★★
                 kilopost_col_name = 'Distance' 
                 if kilopost_col_name in nearest_point and pd.notna(nearest_point[kilopost_col_name]):
                     try:
